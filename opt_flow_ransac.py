@@ -14,6 +14,7 @@ Keys
 ESC - exit
 '''
 
+# TODO remove points on the hood of the car (?) remove points that have an optical flow change below a certain value to remove variability from the middle of the image (?) 
 # TODO play with hyperparameters (VOTER_TOLERANCE), maybe add a moving average filter/smoothing, EKF
 # TODO check error
 # TODO clean up code (remove RANSAC (?), clean up interfaces and class, etc.)
@@ -34,14 +35,14 @@ lk_params = dict( winSize  = (15, 15),
                   maxLevel = 2,
                   criteria = (cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 10, 0.03))
 
-feature_params = dict( maxCorners = 1000, #500,
-                       qualityLevel = 0.3,
-                       minDistance = 7,
+feature_params = dict( maxCorners = 500,
+                       qualityLevel = 0.01, #0.3,
+                       minDistance = 25,
                        blockSize = 7 )
 
 
 # Length of feature history to store, in video frames
-TRACK_LEN = 30
+TRACK_LEN = 2 #30
 
 # Frequency at which feature detection should be run, in number of frames
 FEAT_DETECT_FREQ = 1
@@ -53,7 +54,7 @@ RANSAC_ITER = 1000
 RANSAC_PROX_SAMPLE = True
 
 # Proportion of intersections closest to the center of the image to sample from 
-RANSAC_PROX_PERC = 0.25 
+RANSAC_PROX_PERC = 0.75
 
 # Acceptable L2 distance in pixels between proposed model and voter
 VOTER_TOLERANCE = 5
@@ -99,9 +100,6 @@ class OpticalFlow:
             self.out = args.out
             open(self.out, 'w').close()
         
-
-
-
     def run(self):
         """Run optical flow algorithm on the video clip."""
 
@@ -159,7 +157,10 @@ class OpticalFlow:
     def _calc_angles(self, vp):
         # Normalize vanishing point with respect to the image center
         center = (self.w // 2, self.h // 2)
-        normed = (vp[0] - center[0], vp[1] - center[1])
+
+        # Due to origin of image plane being in top-left corner, need to subtract 
+        # center and vp coordinates differently in order for domain of arctan to work correctly
+        normed = (vp[0] - center[0], center[1] - vp[1])
 
         # Calculate horizontal angle (yaw)
         horiz = math.atan(normed[0] / FOCAL_LEN)
@@ -291,7 +292,7 @@ class OpticalFlow:
                 break
 
             # Randomly select lines
-            ind1, ind2 = self._ransac_sampler(ransac_cnt, ordered_inter, lines)
+            ind1, ind2 = self._ransac_sampler(ordered_inter, lines)
             if ind1 == ind2:
                 continue
 
@@ -322,24 +323,22 @@ class OpticalFlow:
             print("Best model has {} votes (of {} possible)".format(best_votes, len(lines)))
         return best_out
 
-    def _ransac_sampler(self, cnt, inters, lines): 
+    def _ransac_sampler(self, inters, lines): 
         """Return intersections closest to the center of the image if proximity "sampling" is enabled, else random sampling of lines."""
         if RANSAC_PROX_SAMPLE:
+            cnt = np.random.choice(len(inters))
             indices = inters[cnt]
             return indices[1][0], indices[1][1]
         else:
             ind1 = np.random.choice(len(lines))
             ind2 = np.random.choice(len(lines))
         return ind1, ind2
-
-                
+   
     def _feature_detection(self, frame_gray):
         """Run Shi-Tomashi corner detection"""
         # Initialize mask, draw circles for all tracked features
         mask = np.zeros_like(frame_gray)
         mask[:] = 255
-        for x, y in [np.int32(tr[-1]) for tr in self.tracks]:
-            cv.circle(mask, (x, y), 2, 0, -1)
 
         # Run feature detection, detect new features
         p = cv.goodFeaturesToTrack(frame_gray, mask = mask, **feature_params)
@@ -412,17 +411,20 @@ class OpticalFlow:
         cv.putText(vis, ya, (x+1, y+1), cv.FONT_HERSHEY_PLAIN, 1.0, (0, 0, 0), thickness = 2, lineType=cv.LINE_AA)
         cv.putText(vis, ya, (x, y), cv.FONT_HERSHEY_PLAIN, 1.0, (255, 255, 255), lineType=cv.LINE_AA)
 
-        # Plot primary vanishing point in the image
-        cv.circle(vis, (int(vp[0]), int(vp[1])), 10, (0, 0, 255), -1)
-
         # (DEBUG) plot line between image center and the primary vanishing point
         im_center = [int(self.w // 2), int(self.h //2)]
         cv.circle(vis, im_center, 4, (0, 0, 255), -1)
+
+        # Plot primary vanishing point in the image
+        cv.circle(vis, (int(vp[0]), int(vp[1])), 10, (0, 0, 255), -1)
+        try_this = [math.tan(i) * FOCAL_LEN + offset for i, offset in zip((pitch, yaw), im_center)]
         cv.line(vis, (int(vp[0]), int(vp[1])), im_center, [255, 0, 0], 3)
 
         # (DEBUG) plot line between image center and the correct vanishing point
         if self.labels is not None:
-            correct = [math.tan(i) * FOCAL_LEN + offset for i, offset in zip(self.labels[self.frame_idx], im_center)]
+            correct = [0, 0]
+            correct[0] = math.tan(self.labels[self.frame_idx][0]) * FOCAL_LEN + im_center[0]
+            correct[1] = im_center[1] - math.tan(self.labels[self.frame_idx][1]) * FOCAL_LEN
             cv.circle(vis, (int(correct[0]), int(correct[1])), 10, (0, 0, 255), -1)
             cv.line(vis, (int(correct[0]), int(correct[1])), im_center, [255, 0, 255], 3)
 
