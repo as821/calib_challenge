@@ -35,12 +35,15 @@ lk_params = dict( winSize  = (15, 15),
 
 feature_params = dict( maxCorners = 1000,
                        qualityLevel = 0.01, #0.3,
-                       minDistance = 5,
+                       minDistance = 25,
                        blockSize = 7 )
 
 
 # Length of feature history to store, in video frames
-TRACK_LEN = 2
+TRACK_LEN = 3 # 2
+
+# Frequency at which feature detection should be run, in number of frames
+FEAT_DETECT_FREQ = 1
 
 # Number of RANSAC iterations to run
 RANSAC_ITER = 1000
@@ -68,8 +71,8 @@ class OpticalFlow:
     def __init__(self):
         # Initialization
         self.track_len = TRACK_LEN
+        self.detect_interval = FEAT_DETECT_FREQ
         self.tracks = []
-        self.frame_buf = []
         self.frame_idx = 0
         self.w = self.h = -1
         self.prev_pred = None
@@ -104,17 +107,18 @@ class OpticalFlow:
             if frame is None:
                 break
             frame_gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
-            self.frame_buf.append(frame_gray)
-            if len(self.frame_buf) > TRACK_LEN:
-                del self.frame_buf[0]
             vis = frame.copy()
             self.h, self.w = vis.shape[:2]
 
-            if self.frame_idx > 0:
+            if len(self.tracks) > 0:
                 # Run optical flow algorithm
-                vis = self._calc_opt_flow(frame_gray, vis)
+                p1, good = self._calc_opt_flow(frame_gray)
+                
+                # Update tracks
+                self._track_update(p1, good, vis)
 
                 # Run RANSAC algorithm to find primary vanishing point in the image
+                # vp = self._find_optimal_intersection()
                 vp, vis = self._ransac_intersection(vis)
 
                 # Determine pitch and yaw angles
@@ -135,6 +139,10 @@ class OpticalFlow:
                         print("Frame: ", self.frame_idx)
                     with open(self.out, "a") as fd:
                         fd.write(str(pitch) + " " + str(yaw) + "\n")
+
+            if self.frame_idx % self.detect_interval == 0:
+                # Re-detect features periodically using Shi-Tomasi corner detection
+                self._feature_detection(frame_gray)
 
             # Display frame and tracked features
             self.frame_idx += 1
@@ -336,35 +344,22 @@ class OpticalFlow:
         # Run feature detection, detect new features
         p = cv.goodFeaturesToTrack(frame_gray, mask = mask, **feature_params)
         if p is not None:
-            return np.float32(p).reshape(-1, 1, 2)
-        else:
-            return []
+            pre = len(self.tracks)
+            for x, y in np.float32(p).reshape(-1, 2):
+                self.tracks.append([(x, y)])
+            print('Feature detector: {} (pre: {}, new: {})'.format(len(self.tracks), pre, len(np.float32(p).reshape(-1, 2))))
     
-    def _calc_opt_flow(self, frame_gray, vis):
+    def _calc_opt_flow(self, frame_gray):
         """Run Lucas-Kanade optical flow algorithm on new and previous frames. Perform in both directions as a consistency check."""
-        # Detect features and run optical flow
-        img0, img1 = self.frame_buf[0], frame_gray
-        p0 = self._feature_detection(frame_gray)
+        img0, img1 = self.prev_gray, frame_gray
+        p0 = np.float32([tr[-1] for tr in self.tracks]).reshape(-1, 1, 2)
         p1, _st, _err = cv.calcOpticalFlowPyrLK(img0, img1, p0, None, **lk_params)
         p0r, _st, _err = cv.calcOpticalFlowPyrLK(img1, img0, p1, None, **lk_params)
 
         # Validate difference between optical flows as sanity check
         d = abs(p0-p0r).reshape(-1, 2).max(-1)
-
-        # Update stored tracks
-        cnt = 0
-        self.tracks = []
-        for point0, point1, good_flag in zip(p0, p1.reshape(-1, 2), d < 1):
-            if not good_flag:
-                cnt += 1
-                continue
-            self.tracks.append([point0[0], point1])
-            cv.circle(vis, (int(point1[0]), int(point1[1])), 2, (0, 255, 0), -1)
-        #print('tracks: {}, p0: {} (rm cnt: {})'.format(len(self.tracks), len(p0), cnt))
-        return vis
-
-
-
+        return p1, d < 1
+        
     def _track_update(self, p1, good, vis):
         """Update tracked features and remove old instance of those features, draw circles for features"""
         new_tracks = []
@@ -379,7 +374,7 @@ class OpticalFlow:
             new_tracks.append(tr)
             cv.circle(vis, (int(x), int(y)), 2, (0, 255, 0), -1)
         self.tracks = new_tracks
-        #print('tracks: {}, p1: {}, good: {} (rm cnt: {})'.format(len(self.tracks), len(p1.reshape(-1, 2)), len(good), cnt))
+        print('tracks: {}, p1: {}, good: {} (rm cnt: {})'.format(len(self.tracks), len(p1.reshape(-1, 2)), len(good), cnt))
 
     def _plot_calc_line(self, img, p1, p2):
         """Draw a line through points p1 and p2 (of form (x, y)) in the specified image"""

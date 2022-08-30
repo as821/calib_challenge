@@ -48,15 +48,22 @@ def main():
 
         # Draw generated point (and line from center to it)
         if args.generated != "":
-            gen_label = [math.tan(i) * FOCAL_LEN + offset for i, offset in zip(gen[frame_idx], im_center)]
+            gen_label = [0, 0]
+            gen_label[0] = math.tan(gen[frame_idx][0]) * FOCAL_LEN + im_center[0]
+            gen_label[1] = im_center[1] - math.tan(gen[frame_idx][1]) * FOCAL_LEN
             cv.circle(vis, (int(gen_label[0]), int(gen_label[1])), 10, (255, 0, 0), -1)
             cv.line(vis, (int(gen_label[0]), int(gen_label[1])), im_center, [255, 0, 0], 3)
+            print("Gen label: ", gen[frame_idx], end='\t')
 
         # Draw true label point (and line from center to it)
         if not math.isnan(gt[frame_idx][0]):
-            correct = [math.tan(i) * FOCAL_LEN + offset for i, offset in zip(gt[frame_idx], im_center)]
+            correct = [0, 0]
+            correct[0] = math.tan(gt[frame_idx][0]) * FOCAL_LEN + im_center[0]
+            correct[1] = im_center[1] - math.tan(gt[frame_idx][1]) * FOCAL_LEN
             cv.circle(vis, (int(correct[0]), int(correct[1])), 10, (0, 0, 255), -1)
             cv.line(vis, (int(correct[0]), int(correct[1])), im_center, [0, 0, 255], 3)
+            print("GT: ", gt[frame_idx], end='')
+        print('', end="\n")
 
         # Visualize frame
         cv.imshow('lk_track', vis)
