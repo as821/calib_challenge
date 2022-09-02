@@ -14,6 +14,7 @@ Keys
 ESC - exit
 '''
 
+# TODO work on getting video 4 working better (faster, more accurate). May have to change the feature parameters (# of points)
 # TODO play with hyperparameters (VOTER_TOLERANCE), maybe add a moving average filter/smoothing, EKF
 # TODO check error
 # TODO clean up code (remove RANSAC (?), clean up interfaces and class, etc.)
@@ -33,11 +34,15 @@ lk_params = dict( winSize  = (15, 15),
                   maxLevel = 2,
                   criteria = (cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 10, 0.03))
 
-feature_params = dict( maxCorners = 1000,
-                       qualityLevel = 0.01, #0.3,
-                       minDistance = 5,
-                       blockSize = 7 )
+# feature_params = dict( maxCorners = 2000,
+#                        qualityLevel = 0.01,
+#                        minDistance = 5,
+#                        blockSize = 7)
 
+feature_params = dict( maxCorners = 2000,
+                       qualityLevel = 0.00075,
+                       minDistance = 10,
+                       blockSize = 7)
 
 # Length of feature history to store, in video frames
 TRACK_LEN = 2
@@ -49,7 +54,7 @@ RANSAC_ITER = 1000
 RANSAC_PROX_SAMPLE = True
 
 # Proportion of intersections closest to the center of the image to sample from 
-RANSAC_PROX_PERC = 0.75
+RANSAC_PROX_PERC = 0.25
 
 # Acceptable L2 distance in pixels between proposed model and voter
 VOTER_TOLERANCE = 20
@@ -57,11 +62,14 @@ VOTER_TOLERANCE = 20
 # Focal length of camera in pixels
 FOCAL_LEN = 910
 
+# Pixel size of the hood of the car
+HOOD_PIX_SZ = 200
+
 # True to plot full-image lines, False to plot squiggles 
 PLOT_LINES = False
 
 # Set to True for debugging output + visualization, False to output only pitch, yaw in output format expected by evaluation script
-DEBUG = True
+DEBUG = False
 
 
 class OpticalFlow:
@@ -100,6 +108,10 @@ class OpticalFlow:
 
         while True:
             # Get next video frame
+            i_center = [self.w // 2, self.h //2]
+            a_true = [0, 0]
+            a_true[0] = math.tan(self.labels[self.frame_idx][0]) * FOCAL_LEN + i_center[0]
+            a_true[1] = i_center[1] - math.tan(self.labels[self.frame_idx][1]) * FOCAL_LEN
             _ret, frame = self.cam.read()
             if frame is None:
                 break
@@ -115,14 +127,14 @@ class OpticalFlow:
                 vis = self._calc_opt_flow(frame_gray, vis)
 
                 # Run RANSAC algorithm to find primary vanishing point in the image
-                vp, vis = self._ransac_intersection(vis)
+                vp, vis, debug_votes = self._ransac_intersection(vis)
 
                 # Determine pitch and yaw angles
                 pitch, yaw = self._calc_angles(vp)
 
                 if DEBUG:
                     if self.labels is not None:
-                        print("\tPitch/yaw: " + str(pitch) + "/" + str(yaw)  + "\t(" + str(self.labels[self.frame_idx][0]) + "/" + str(self.labels[self.frame_idx][0]) + ")")
+                        print("\tPitch/yaw: " + str(pitch) + "/" + str(yaw)  + "\t(" + str(self.labels[self.frame_idx][0]) + "/" + str(self.labels[self.frame_idx][1]) + ")")
                     else:
                         print("\tPitch/yaw: " + str(pitch) + "/" + str(yaw))
 
@@ -224,41 +236,6 @@ class OpticalFlow:
                 lines.append((slope, p1[1] - (p1[0] * slope)))
         return lines
 
-    def _find_optimal_intersection(self):
-        lines = self._get_lines()
-        best_model = []
-        best_votes = 0
-
-        # Precompute all line intersections
-        if DEBUG:
-            print("Pre-calc, ", end='')
-        inter_map = self._calc_all_intersections(lines)
-
-        # Determine intersection with most consensus
-        if DEBUG:
-            print("Voting... ", end='')
-        for ind1 in range(len(lines)-1):
-            for ind2 in range(ind1+1, len(lines)):
-                current_votes, curr_intersection = self._compute_votes(lines, ind1, ind2, inter_map)
-                if current_votes >= best_votes:
-                    # Handle multiple intersections with the same number of votes
-                    if current_votes > best_votes:
-                        best_model = [curr_intersection]
-                        best_votes = current_votes
-                    best_model.append(curr_intersection)
-
-                    
-        # Average the models that receive the most number of votes
-        best_out = [0, 0]
-        for mod in best_model:
-            best_out[0] += mod[0]
-            best_out[1] += mod[1]
-        best_out[0] /= len(best_model)
-        best_out[1] /= len(best_model)
-        if DEBUG:
-            print("Best model has {} votes (of {} possible)".format(best_votes, len(lines)))
-        return best_out
-
     def _ransac_intersection(self, vis):
         lines = self._get_lines()
         best_model = []
@@ -276,6 +253,7 @@ class OpticalFlow:
         ordered_inter = ordered_inter[:sample_size]
 
         # Run RANSAC iterations
+        debug_votes = []
         for ransac_cnt in range(RANSAC_ITER):
             # If have already sampled every intersection, move on
             if RANSAC_PROX_SAMPLE and ransac_cnt >= len(ordered_inter):
@@ -288,6 +266,7 @@ class OpticalFlow:
 
             # Determine consensus
             current_votes, curr_intersection = self._compute_votes(lines, ind1, ind2, inter_map)
+            debug_votes.append((current_votes, curr_intersection))
             if current_votes >= best_votes:
                 # Handle multiple intersections with the same number of votes
                 if current_votes > best_votes:
@@ -314,7 +293,8 @@ class OpticalFlow:
             best_out = self.prev_pred
         if DEBUG:
             print("Best model has {} votes (of {} possible)".format(best_votes, len(lines)))
-        return best_out, vis
+        debug_votes.sort(reverse=True)
+        return best_out, vis, debug_votes
 
     def _ransac_sampler(self, inters, lines): 
         """Return intersections closest to the center of the image if proximity "sampling" is enabled, else random sampling of lines."""
@@ -356,30 +336,17 @@ class OpticalFlow:
         self.tracks = []
         for point0, point1, good_flag in zip(p0, p1.reshape(-1, 2), d < 1):
             if not good_flag:
+                continue
+            
+            # Filter any features on the hood of the car
+            if point0[0][1] >= self.h - HOOD_PIX_SZ:
                 cnt += 1
                 continue
+
             self.tracks.append([point0[0], point1])
             cv.circle(vis, (int(point1[0]), int(point1[1])), 2, (0, 255, 0), -1)
-        #print('tracks: {}, p0: {} (rm cnt: {})'.format(len(self.tracks), len(p0), cnt))
+        print('tracks: {}, p0: {} (hood cnt: {})'.format(len(self.tracks), len(p0), cnt))
         return vis
-
-
-
-    def _track_update(self, p1, good, vis):
-        """Update tracked features and remove old instance of those features, draw circles for features"""
-        new_tracks = []
-        cnt = 0
-        for tr, (x, y), good_flag in zip(self.tracks, p1.reshape(-1, 2), good):
-            if not good_flag:
-                cnt += 1
-                continue
-            tr.append((x, y))
-            while len(tr) > self.track_len:
-                del tr[0]
-            new_tracks.append(tr)
-            cv.circle(vis, (int(x), int(y)), 2, (0, 255, 0), -1)
-        self.tracks = new_tracks
-        #print('tracks: {}, p1: {}, good: {} (rm cnt: {})'.format(len(self.tracks), len(p1.reshape(-1, 2)), len(good), cnt))
 
     def _plot_calc_line(self, img, p1, p2):
         """Draw a line through points p1 and p2 (of form (x, y)) in the specified image"""
